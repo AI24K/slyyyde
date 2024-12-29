@@ -3,6 +3,7 @@ import { DubApiError } from "@/lib/api/errors";
 import { linkCache } from "@/lib/api/links/cache";
 import { getLinkOrThrow } from "@/lib/api/links/get-link-or-throw";
 import { withWorkspace } from "@/lib/auth";
+import { checkFolderPermission } from "@/lib/folder/permissions";
 import { recordLink } from "@/lib/tinybird";
 import z from "@/lib/zod";
 import { prisma } from "@dub/prisma";
@@ -24,6 +25,15 @@ export const POST = withWorkspace(
       workspaceId: workspace.id,
       linkId: params.linkId,
     });
+
+    if (link.folderId) {
+      await checkFolderPermission({
+        folderId: link.folderId,
+        workspaceId: workspace.id,
+        userId: session.user.id,
+        requiredPermission: "folders.links.write",
+      });
+    }
 
     const { newWorkspaceId } = transferLinkBodySchema.parse(await req.json());
 
@@ -74,6 +84,8 @@ export const POST = withWorkspace(
         tags: {
           deleteMany: {},
         },
+        // remove folder when transferring link
+        folderId: null,
       },
     });
 
@@ -87,6 +99,7 @@ export const POST = withWorkspace(
           key: link.key,
           url: link.url,
           tag_ids: [],
+          folder_id: null,
           program_id: link.programId ?? "",
           workspace_id: newWorkspaceId,
           created_at: link.createdAt,

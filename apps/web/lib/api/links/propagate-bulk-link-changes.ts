@@ -16,6 +16,7 @@ export async function propagateBulkLinkChanges(links: ExpandedLink[]) {
         tag_ids: link.tags?.map(({ tag }) => tag.id) ?? [],
         program_id: link.programId ?? "",
         workspace_id: link.projectId,
+        folder_id: link.folderId,
         created_at: link.createdAt,
       })),
     ),
