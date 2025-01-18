@@ -5,12 +5,11 @@ import { withWorkspace } from "@/lib/auth";
 import { webhookCache } from "@/lib/webhook/cache";
 import { createWebhook } from "@/lib/webhook/create-webhook";
 import { transformWebhook } from "@/lib/webhook/transform";
-import { toggleWebhooksForWorkspace } from "@/lib/webhook/update-webhook";
 import {
+  checkForClickTrigger,
   identifyWebhookReceiver,
-  isLinkLevelWebhook,
 } from "@/lib/webhook/utils";
-import { createWebhookSchema } from "@/lib/zod/schemas/webhooks";
+import { createWebhookSchema, WebhookSchema } from "@/lib/zod/schemas/webhooks";
 import { prisma } from "@dub/prisma";
 import { WebhookReceiver } from "@dub/prisma/client";
 import { ZAPIER_INTEGRATION_ID } from "@dub/utils/src/constants";
@@ -18,6 +17,7 @@ import { waitUntil } from "@vercel/functions";
 import { sendEmail } from "emails";
 import WebhookAdded from "emails/webhook-added";
 import { NextResponse } from "next/server";
+import z from "node_modules/zod/lib";
 
 // GET /api/webhooks - get all webhooks for the given workspace
 export const GET = withWorkspace(
@@ -33,7 +33,6 @@ export const GET = withWorkspace(
         secret: true,
         triggers: true,
         disabledAt: true,
-        links: true,
         receiver: true,
         installationId: true,
       },
@@ -42,7 +41,7 @@ export const GET = withWorkspace(
       },
     });
 
-    return NextResponse.json(webhooks.map(transformWebhook));
+    return NextResponse.json(z.array(WebhookSchema).parse(webhooks));
   },
   {
     requiredPermissions: ["webhooks.read"],
@@ -59,7 +58,7 @@ export const GET = withWorkspace(
 // POST /api/webhooks/ - create a new webhook
 export const POST = withWorkspace(
   async ({ req, workspace, session }) => {
-    const { name, url, triggers, linkIds, secret } = createWebhookSchema.parse(
+    const { name, url, triggers, secret } = createWebhookSchema.parse(
       await parseRequestBody(req),
     );
 
@@ -75,26 +74,6 @@ export const POST = withWorkspace(
         code: "conflict",
         message: "A Webhook with this URL already exists.",
       });
-    }
-
-    if (linkIds && linkIds.length > 0) {
-      const links = await prisma.link.findMany({
-        where: {
-          id: { in: linkIds },
-          projectId: workspace.id,
-        },
-        select: {
-          id: true,
-        },
-      });
-
-      if (links.length !== linkIds.length) {
-        throw new DubApiError({
-          code: "bad_request",
-          message:
-            "Invalid link IDs provided. Please check the links you are adding the webhook to.",
-        });
-      }
     }
 
     // Zapier use this endpoint to create webhooks from their app
@@ -118,7 +97,6 @@ export const POST = withWorkspace(
       url,
       receiver: isZapierWebhook ? WebhookReceiver.zapier : WebhookReceiver.user,
       triggers,
-      linkIds,
       secret,
       workspace,
       installationId: zapierInstallation ? zapierInstallation.id : undefined,
@@ -133,9 +111,11 @@ export const POST = withWorkspace(
 
     waitUntil(
       (async () => {
+        // TODO:
+        // Handle this via a background job
+
         const links = await prisma.link.findMany({
           where: {
-            id: { in: linkIds },
             projectId: workspace.id,
           },
           include: {
@@ -148,9 +128,6 @@ export const POST = withWorkspace(
         });
 
         Promise.allSettled([
-          toggleWebhooksForWorkspace({
-            workspaceId: workspace.id,
-          }),
           sendEmail({
             email: session.user.email,
             subject: "New webhook added",
@@ -165,9 +142,10 @@ export const POST = withWorkspace(
               },
             }),
           }),
+
           ...(links && links.length > 0 ? [linkCache.mset(links), []] : []),
 
-          ...(isLinkLevelWebhook(webhook) ? [webhookCache.set(webhook)] : []),
+          ...(checkForClickTrigger(webhook) ? [webhookCache.set(webhook)] : []),
         ]);
       })(),
     );
