@@ -8,6 +8,7 @@ import { sendWorkspaceWebhookOnEdge } from "@/lib/webhook/publish-edge";
 import { transformSaleEventData } from "@/lib/webhook/transform";
 import { clickEventSchemaTB } from "@/lib/zod/schemas/clicks";
 import {
+  saleEventSchemaTB,
   trackSaleRequestSchema,
   trackSaleResponseSchema,
 } from "@/lib/zod/schemas/sales";
@@ -15,6 +16,7 @@ import { prismaEdge } from "@dub/prisma/edge";
 import { nanoid } from "@dub/utils";
 import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 export const runtime = "edge";
 
@@ -69,27 +71,13 @@ export const POST = withWorkspaceEdge(
       });
     }
 
-    const clickData = clickEventSchemaTB
-      .omit({ timestamp: true })
-      .parse(leadEvent.data[0]);
-
     waitUntil(
       (async () => {
-        const eventId = nanoid(16);
+        const clickData = clickEventSchemaTB
+          .omit({ timestamp: true })
+          .parse(leadEvent.data[0]);
 
-        const [_sale, link, _project] = await Promise.all([
-          recordSale({
-            ...clickData,
-            event_id: eventId,
-            event_name: eventName,
-            customer_id: customer.id,
-            payment_processor: paymentProcessor,
-            amount,
-            currency,
-            invoice_id: invoiceId || "",
-            metadata: metadata ? JSON.stringify(metadata) : "",
-          }),
-
+        const [link, _project] = await Promise.all([
           // update link sales count
           prismaEdge.link.update({
             where: {
@@ -104,6 +92,7 @@ export const POST = withWorkspaceEdge(
               },
             },
           }),
+
           // update workspace sales usage
           prismaEdge.project.update({
             where: {
@@ -119,6 +108,20 @@ export const POST = withWorkspaceEdge(
             },
           }),
         ]);
+
+        const saleDataTB: z.infer<typeof saleEventSchemaTB> = {
+          ...clickData,
+          event_id: nanoid(16),
+          event_name: eventName,
+          customer_id: customer.id,
+          payment_processor: paymentProcessor,
+          amount,
+          currency,
+          invoice_id: invoiceId || "",
+          metadata: metadata ? JSON.stringify(metadata) : "",
+          earnings: 0,
+          status: "",
+        };
 
         // for program links
         if (link.programId) {
@@ -149,11 +152,14 @@ export const POST = withWorkspaceEdge(
               amount,
               currency,
               invoiceId,
-              eventId,
+              eventId: saleDataTB.event_id,
               paymentProcessor,
             },
             metadata: clickData,
           });
+
+          saleDataTB["earnings"] = saleRecord.earnings;
+          saleDataTB["status"] = saleRecord.status;
 
           await Promise.allSettled([
             prismaEdge.sale.create({
@@ -172,6 +178,8 @@ export const POST = withWorkspaceEdge(
             }),
           ]);
         }
+
+        await recordSale(saleDataTB);
 
         // Send workspace webhook
         const sale = transformSaleEventData({
